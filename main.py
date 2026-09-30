@@ -33,6 +33,13 @@ def main():
     config_mgr = ConfigManager()
     engine = get_wallpaper_engine()
 
+    # Ensure startup registry is synced to current valid executable path
+    if config_mgr.get("run_at_startup", False):
+        try:
+            engine.set_startup(True)
+        except Exception:
+            pass
+
     folders = config_mgr.get("folders", [])
     include_subfolders = config_mgr.get("include_subfolders", True)
     history = config_mgr.get("history", [])

@@ -1,6 +1,7 @@
 import os
 import sys
 import ctypes
+from ctypes import wintypes
 import winreg
 from abc import ABC, abstractmethod
 from PIL import Image
@@ -154,27 +155,75 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
         except Exception as e:
             print(f"Warning: Failed to set wallpaper style in registry: {e}")
 
+    def _set_wallpaper_com(self, image_path: str, scaling_mode: str = 'Fill') -> bool:
+        """Sets wallpaper via modern IDesktopWallpaper COM interface to trigger smooth DWM cross-fade transition."""
+        try:
+            ctypes.windll.ole32.CoInitialize(None)
+
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ('Data1', wintypes.DWORD),
+                    ('Data2', wintypes.WORD),
+                    ('Data3', wintypes.WORD),
+                    ('Data4', ctypes.c_byte * 8)
+                ]
+
+            clsid = GUID()
+            iid = GUID()
+            ctypes.windll.ole32.CLSIDFromString('{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}', ctypes.byref(clsid))
+            ctypes.windll.ole32.CLSIDFromString('{B92B56A9-8B55-4E14-9A89-0199BBB6F93B}', ctypes.byref(iid))
+
+            pWallpaper = ctypes.c_void_p()
+            hr = ctypes.windll.ole32.CoCreateInstance(
+                ctypes.byref(clsid),
+                None,
+                23,  # CLSCTX_ALL
+                ctypes.byref(iid),
+                ctypes.byref(pWallpaper)
+            )
+            if hr != 0 or not pWallpaper.value:
+                return False
+
+            vtable = ctypes.cast(pWallpaper, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+
+            # SetPosition
+            DWPO_MAP = {'Center': 0, 'Tile': 1, 'Stretch': 2, 'Fit': 3, 'Fill': 4, 'Span': 5}
+            pos_val = DWPO_MAP.get(scaling_mode, 4)
+            SetPosition = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_int)(vtable[10])
+            SetPosition(pWallpaper, pos_val)
+
+            # SetWallpaper(this, monitorID=None, path) -> triggers smooth Windows DWM crossfade
+            abs_path = os.path.abspath(image_path)
+            SetWallpaper = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p)(vtable[3])
+            hr_set = SetWallpaper(pWallpaper, None, abs_path)
+
+            Release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
+            Release(pWallpaper)
+
+            return hr_set == 0
+        except Exception as e:
+            print(f"IDesktopWallpaper COM transition notice: {e}")
+            return False
+
     def set_wallpaper(self, image_path: str, scaling_mode: str = 'Fill') -> bool:
         """
-        Sets desktop wallpaper. Converts format to universal BMP cache if necessary
-        or ensures Windows can load it reliably.
+        Sets desktop wallpaper with smooth cross-fade animation.
+        Converts format to universal BMP cache if necessary.
         """
         if not image_path or not os.path.exists(image_path):
             return False
 
-        # First apply registry scaling style
+        # Apply registry scaling style for system persistence
         self._apply_scaling_registry(scaling_mode)
 
         ext = os.path.splitext(image_path)[1].lower()
         target_path = image_path
 
-        # If it's a format like .webp or .jfif, or if we want 100% crash-proof Windows support,
-        # convert it into the cached BMP/PNG file
+        # If it's a format like .webp or .jfif, convert to cached BMP file
         needs_conversion = ext in {'.webp', '.jfif', '.tif', '.tiff'}
         if needs_conversion:
             try:
                 with Image.open(image_path) as img:
-                    # Convert to RGB if RGBA or P
                     if img.mode not in ('RGB', 'L'):
                         img = img.convert('RGB')
                     img.save(self.cached_wallpaper_path, 'BMP')
@@ -183,7 +232,11 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
                 print(f"Error converting image {image_path}: {e}")
                 target_path = image_path
 
-        # Call Windows API
+        # Primary: Modern COM IDesktopWallpaper with DWM smooth cross-fade
+        if self._set_wallpaper_com(target_path, scaling_mode):
+            return True
+
+        # Fallback: legacy SystemParametersInfoW
         try:
             result = ctypes.windll.user32.SystemParametersInfoW(
                 SPI_SETDESKWALLPAPER,
@@ -197,7 +250,7 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
             return False
 
     def is_startup_enabled(self) -> bool:
-        """Checks if startup entry exists in HKCU Run registry."""
+        """Checks if startup entry exists and points to a valid file in HKCU Run registry."""
         try:
             key = winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,
@@ -208,12 +261,18 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
             try:
                 val, _ = winreg.QueryValueEx(key, 'BushtwoBGS')
                 winreg.CloseKey(key)
-                return bool(val)
+                if val:
+                    cmd_path = val.split('"')[1] if '"' in val else val.split()[0]
+                    return os.path.exists(cmd_path)
+                return False
             except FileNotFoundError:
                 try:
                     val, _ = winreg.QueryValueEx(key, 'WallpaperSwitcher')
                     winreg.CloseKey(key)
-                    return bool(val)
+                    if val:
+                        cmd_path = val.split('"')[1] if '"' in val else val.split()[0]
+                        return os.path.exists(cmd_path)
+                    return False
                 except FileNotFoundError:
                     winreg.CloseKey(key)
                     return False
@@ -224,9 +283,10 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
         """Adds or removes the startup entry in HKCU Run registry."""
         key_path = r'Software\Microsoft\Windows\CurrentVersion\Run'
         if getattr(sys, 'frozen', False):
-            cmd = f'"{sys.executable}" --minimized'
+            target = os.path.abspath(sys.executable)
+            cmd = f'"{target}" --minimized'
         else:
-            app_main = os.path.join(self.app_dir, 'main.py')
+            app_main = os.path.abspath(os.path.join(self.app_dir, 'main.py'))
             python_dir = os.path.dirname(sys.executable)
             pythonw_path = os.path.join(python_dir, 'pythonw.exe')
             if not os.path.exists(pythonw_path):
@@ -234,30 +294,27 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
             cmd = f'"{pythonw_path}" "{app_main}" --minimized'
 
         try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                key_path,
+                0,
+                winreg.KEY_SET_VALUE
+            )
+            # Remove legacy key if still present
+            try:
+                winreg.DeleteValue(key, 'WallpaperSwitcher')
+            except FileNotFoundError:
+                pass
+
             if enable:
-                key = winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER,
-                    key_path,
-                    0,
-                    winreg.KEY_SET_VALUE
-                )
                 winreg.SetValueEx(key, 'BushtwoBGS', 0, winreg.REG_SZ, cmd)
-                winreg.CloseKey(key)
-                return True
             else:
-                key = winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER,
-                    key_path,
-                    0,
-                    winreg.KEY_SET_VALUE
-                )
-                for k in ['BushtwoBGS', 'WallpaperSwitcher']:
-                    try:
-                        winreg.DeleteValue(key, k)
-                    except FileNotFoundError:
-                        pass
-                winreg.CloseKey(key)
-                return True
+                try:
+                    winreg.DeleteValue(key, 'BushtwoBGS')
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+            return True
         except Exception as e:
             print(f"Error updating startup registry: {e}")
             return False

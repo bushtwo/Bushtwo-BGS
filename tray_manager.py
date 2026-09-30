@@ -3,6 +3,7 @@ import sys
 import threading
 import tempfile
 import ctypes
+from ctypes import wintypes
 from PIL import Image
 import pystray
 from pystray import MenuItem as item
@@ -17,7 +18,6 @@ def _load_hbitmap(png_path):
     if not os.path.exists(png_path):
         return None
     try:
-        from ctypes import wintypes
 
         class BITMAPINFOHEADER(ctypes.Structure):
             _fields_ = [

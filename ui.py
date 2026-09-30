@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import datetime
 import ctypes
@@ -108,11 +109,11 @@ def make_rounded_thumbnail(img, target_w, target_h, radius=16):
 class AutoRoundedCard(tk.Canvas):
     """
     16px Anti-aliased Rounded Container Card.
-    Hugs contents dynamically with 24px tblr padding.
+    Hugs contents dynamically with 16px tblr padding.
     No hardcoded height clipping!
     """
 
-    def __init__(self, parent, bg_color=M3_SURFACE_CONTAINER, window_bg=M3_SURFACE, radius=16, pad_x=24, pad_y=24, **kwargs):
+    def __init__(self, parent, bg_color=M3_SURFACE_CONTAINER, window_bg=M3_SURFACE, radius=16, pad_x=16, pad_y=16, **kwargs):
         super().__init__(parent, bg=window_bg, bd=0, highlightthickness=0, **kwargs)
         self.bg_color = bg_color
         self.window_bg = window_bg
@@ -123,7 +124,7 @@ class AutoRoundedCard(tk.Canvas):
         self.card_img = None
         self.inner_win = None
 
-        # Automatically adjust canvas height to hug inner frame content + 24px padding
+        # Automatically adjust canvas height to hug inner frame content + 16px padding
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.bind("<Configure>", self._on_canvas_configure)
 
@@ -162,7 +163,9 @@ class AutoRoundedCard(tk.Canvas):
 class RoundedPopupMenu:
     """
     Popup Dropdown Menu with 16px Rounded Corners and NO BORDERS.
-    Uses Windows 11 DWM rounded window attribute + Anti-aliased Canvas.
+    Uses Win32 SetWindowRgn with CreateRoundRectRgn to clip the entire window to
+    a 16px rounded rectangle, ensuring 100% transparent corners without black edges.
+    Features 16px tblr padding and 8px spacing between options.
     """
 
     def __init__(self, parent, values, callback, width=240, bg=M3_SURFACE_CONTAINER_HIGH, fg=M3_ON_SURFACE, active_bg=M3_PRIMARY_CONTAINER, active_fg=M3_ON_PRIMARY_CONTAINER, radius=16):
@@ -176,7 +179,6 @@ class RoundedPopupMenu:
         self.active_fg = active_fg
         self.radius = radius
         self.top = None
-        self.bg_img = None
 
     def show(self, x, y):
         if self.top and self.top.winfo_exists():
@@ -184,70 +186,94 @@ class RoundedPopupMenu:
 
         self.top = tk.Toplevel(self.parent)
         self.top.overrideredirect(True)
-        self.top.configure(bg=M3_SURFACE)
+        self.top.configure(bg=self.bg)
 
-        # Apply native Windows 11 rounded window attribute (DWMWCP_ROUND)
-        try:
-            hwnd = ctypes.windll.user32.GetParent(self.top.winfo_id()) or self.top.winfo_id()
-            val = ctypes.c_int(2)  # DWMWCP_ROUND
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(val), ctypes.sizeof(val))
-        except Exception:
-            pass
+        # 16px tblr padding container
+        container = tk.Frame(self.top, bg=self.bg)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
 
-        row_h = 32
-        pad_v = 10
-        total_h = len(self.values) * row_h + pad_v * 2
-
-        canvas = tk.Canvas(self.top, width=self.width, height=total_h, bg=M3_SURFACE, bd=0, highlightthickness=0)
-        canvas.pack(fill="both", expand=True)
-
-        # Anti-aliased rounded rectangle background with NO border
-        scale = 2
-        img = Image.new("RGBA", (self.width * scale, total_h * scale), M3_SURFACE)
-        d = ImageDraw.Draw(img)
-        d.rounded_rectangle([0, 0, self.width * scale - 1, total_h * scale - 1], radius=self.radius * scale, fill=self.bg)
-        img = img.resize((self.width, total_h), Image.Resampling.LANCZOS)
-        self.bg_img = ImageTk.PhotoImage(img)
-        canvas.create_image(0, 0, anchor="nw", image=self.bg_img)
-
-        inner = tk.Frame(canvas, bg=self.bg)
-        canvas.create_window(self.width // 2, total_h // 2, window=inner, width=self.width - 16, height=total_h - 16)
-
-        for val in self.values:
+        for i, val in enumerate(self.values):
             row = tk.Label(
-                inner,
+                container,
                 text=f"  {val}",
-                font=(FONT_FAMILY, 9),
+                font=(FONT_FAMILY, 9.5),
                 bg=self.bg,
                 fg=self.fg,
                 anchor="w",
                 cursor="hand2",
-                padx=8,
-                pady=4
+                padx=10,
+                pady=6
             )
-            row.pack(fill="x", pady=1)
+            is_last = (i == len(self.values) - 1)
+            # 8px space between options
+            row.pack(fill="x", pady=(0, 0 if is_last else 8))
 
             def _bind_row(v, r):
                 def _enter(e): r.configure(bg=self.active_bg, fg=self.active_fg)
                 def _leave(e): r.configure(bg=self.bg, fg=self.fg)
                 def _click(e):
                     self.callback(v)
-                    self.top.destroy()
+                    if self.top and self.top.winfo_exists():
+                        self.top.destroy()
                 r.bind("<Enter>", _enter)
                 r.bind("<Leave>", _leave)
                 r.bind("<Button-1>", _click)
 
             _bind_row(val, row)
 
-        self.top.geometry(f"{self.width}x{total_h}+{x}+{y}")
+        self.top.update_idletasks()
+        w = max(self.width, self.top.winfo_reqwidth())
+        h = self.top.winfo_reqheight()
+
+        # Adjust position if it exceeds bottom of screen
+        screen_h = self.top.winfo_screenheight()
+        if y + h > screen_h - 40:
+            y = max(10, y - h - 36)
+
+        self.top.geometry(f"{w}x{h}+{x}+{y}")
+        self.top.update_idletasks()
+
+        # Win32 clipping region: clips entire window to 16px rounded rectangle so corners are 100% transparent
+        if sys.platform == 'win32':
+            try:
+                hwnd = ctypes.windll.user32.GetParent(self.top.winfo_id()) or self.top.winfo_id()
+                val = ctypes.c_int(2)  # DWMWCP_ROUND
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(val), ctypes.sizeof(val))
+                hrgn = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1, self.radius * 2, self.radius * 2)
+                ctypes.windll.user32.SetWindowRgn(hwnd, hrgn, True)
+            except Exception as e:
+                print(f"Could not apply rounded region to popup: {e}")
 
         # Auto-dismiss on click outside
+        def _check_click_outside(event):
+            if self.top and self.top.winfo_exists():
+                px, py = self.top.winfo_pointerxy()
+                rx = self.top.winfo_rootx()
+                ry = self.top.winfo_rooty()
+                rw = self.top.winfo_width()
+                rh = self.top.winfo_height()
+                if not (rx <= px <= rx + rw and ry <= py <= ry + rh):
+                    self.top.destroy()
+
+        toplevel_parent = self.parent.winfo_toplevel()
+        toplevel_parent.bind("<Button-1>", _check_click_outside, add="+")
+
         def _on_focus_out(e):
             if self.top and self.top.winfo_exists():
-                self.top.destroy()
+                self.top.after(120, self._maybe_destroy)
 
         self.top.bind("<FocusOut>", _on_focus_out)
         self.top.focus_set()
+
+    def _maybe_destroy(self):
+        if self.top and self.top.winfo_exists():
+            px, py = self.top.winfo_pointerxy()
+            rx = self.top.winfo_rootx()
+            ry = self.top.winfo_rooty()
+            rw = self.top.winfo_width()
+            rh = self.top.winfo_height()
+            if not (rx <= px <= rx + rw and ry <= py <= ry + rh):
+                self.top.destroy()
 
 
 class M3RoundedDropdown(tk.Frame):
@@ -366,7 +392,7 @@ class PhosphorCheckbox(tk.Frame):
 class WallpaperSwitcherUI:
     """
     Bushtwo BGS - Material 3 User Interface
-    Strict 24px tblr padding inside sections (auto-hugs content).
+    Strict 16px tblr padding inside sections (auto-hugs content).
     16px spacing between sections.
     16px rounded corners, borderless rounded dropdown menus,
     and readable, full-size typography.
@@ -498,13 +524,13 @@ class WallpaperSwitcherUI:
         )
 
     # ---------------------------------------------------------
-    # MAIN UI LAYOUT (24px TBLR PADDING IN SECTIONS, 16px SPACING)
+    # MAIN UI LAYOUT (16px TBLR PADDING IN SECTIONS, 16px SPACING)
     # ---------------------------------------------------------
     def _build_ui_layout(self):
         self.main_container = tk.Frame(self.root, bg=M3_SURFACE)
         self.main_container.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # 1. Current Wallpaper Preview Section (24px padding inside)
+        # 1. Current Wallpaper Preview Section (16px padding inside)
         self._build_section1_preview()
 
         # 2. Desktop Monitor Details Section (16px gap from above)
@@ -534,10 +560,10 @@ class WallpaperSwitcherUI:
         self.root.geometry(f"{req_w}x{req_h}+{pos_x}+{pos_y}")
 
     # ---------------------------------------------------------
-    # 1. CURRENT DESKTOP WALLPAPER PREVIEW (24px PADDING)
+    # 1. CURRENT DESKTOP WALLPAPER PREVIEW (16px PADDING)
     # ---------------------------------------------------------
     def _build_section1_preview(self):
-        self.card_preview = AutoRoundedCard(self.main_container, radius=16, pad_x=24, pad_y=24)
+        self.card_preview = AutoRoundedCard(self.main_container, radius=16, pad_x=16, pad_y=16)
         self.card_preview.pack(fill="x", pady=(0, 16))
 
         inner = self.card_preview.inner
@@ -570,10 +596,10 @@ class WallpaperSwitcherUI:
         self.preview_label.pack(expand=True, fill="both")
 
     # ---------------------------------------------------------
-    # 2. UNDERNEATH CURRENT DESKTOP MONITOR DETAILS (24px PADDING, 16px GAP)
+    # 2. UNDERNEATH CURRENT DESKTOP MONITOR DETAILS (16px PADDING, 16px GAP)
     # ---------------------------------------------------------
     def _build_section2_monitor_details(self):
-        self.card_monitor = AutoRoundedCard(self.main_container, bg_color=M3_SURFACE_CONTAINER_LOW, radius=16, pad_x=24, pad_y=16)
+        self.card_monitor = AutoRoundedCard(self.main_container, bg_color=M3_SURFACE_CONTAINER_LOW, radius=16, pad_x=16, pad_y=16)
         self.card_monitor.pack(fill="x", pady=(0, 16))
 
         inner = self.card_monitor.inner
@@ -602,10 +628,10 @@ class WallpaperSwitcherUI:
         self.monitor_detail_label.pack(side="left", padx=8)
 
     # ---------------------------------------------------------
-    # 3. WALLPAPER NAME & CONTROLS (24px PADDING, 16px GAP)
+    # 3. WALLPAPER NAME & CONTROLS (16px PADDING, 16px GAP)
     # ---------------------------------------------------------
     def _build_section3_wallpaper_controls(self):
-        self.card_controls = AutoRoundedCard(self.main_container, radius=16, pad_x=24, pad_y=24)
+        self.card_controls = AutoRoundedCard(self.main_container, radius=16, pad_x=16, pad_y=16)
         self.card_controls.pack(fill="x", pady=(0, 16))
 
         inner = self.card_controls.inner
@@ -695,10 +721,10 @@ class WallpaperSwitcherUI:
         self._update_timer_badge()
 
     # ---------------------------------------------------------
-    # 4. FOLDERS LIST & ACTIONS (24px PADDING, 16px GAP, HUGS CONTENTS)
+    # 4. FOLDERS LIST & ACTIONS (16px PADDING, 16px GAP, HUGS CONTENTS)
     # ---------------------------------------------------------
     def _build_section4_folders(self):
-        self.card_folders = AutoRoundedCard(self.main_container, radius=16, pad_x=24, pad_y=24)
+        self.card_folders = AutoRoundedCard(self.main_container, radius=16, pad_x=16, pad_y=16)
         self.card_folders.pack(fill="x", pady=(0, 16))
 
         inner = self.card_folders.inner
@@ -804,14 +830,14 @@ class WallpaperSwitcherUI:
         self.cb_subfolders.pack(side="right")
 
     # ---------------------------------------------------------
-    # 5. SIDE-BY-SIDE: SCALING MODE & SHUFFLE TIMER (24px PADDING, 16px GAP)
+    # 5. SIDE-BY-SIDE: SCALING MODE & SHUFFLE TIMER (16px PADDING, 16px GAP)
     # ---------------------------------------------------------
     def _build_section5_scaling_and_timer_side_by_side(self):
         row_frame = tk.Frame(self.main_container, bg=M3_SURFACE)
         row_frame.pack(fill="x", pady=(0, 16))
 
-        # ---- LEFT COLUMN: SCALING MODE (24px padding inside) ----
-        self.card_scaling = AutoRoundedCard(row_frame, radius=16, pad_x=24, pad_y=20)
+        # ---- LEFT COLUMN: SCALING MODE (16px padding inside) ----
+        self.card_scaling = AutoRoundedCard(row_frame, radius=16, pad_x=16, pad_y=16)
         self.card_scaling.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
         inner_left = self.card_scaling.inner
@@ -848,8 +874,8 @@ class WallpaperSwitcherUI:
         )
         self.scaling_desc_label.pack(fill="x")
 
-        # ---- RIGHT COLUMN: SHUFFLE TIMER (24px padding inside) ----
-        self.card_timer = AutoRoundedCard(row_frame, radius=16, pad_x=24, pad_y=20)
+        # ---- RIGHT COLUMN: SHUFFLE TIMER (16px padding inside) ----
+        self.card_timer = AutoRoundedCard(row_frame, radius=16, pad_x=16, pad_y=16)
         self.card_timer.pack(side="right", fill="both", expand=True, padx=(8, 0))
 
         inner_right = self.card_timer.inner
@@ -898,10 +924,10 @@ class WallpaperSwitcherUI:
         return hints.get(mode, "Select scaling mode")
 
     # ---------------------------------------------------------
-    # 6. SYSTEM OPTIONS (24px PADDING)
+    # 6. SYSTEM OPTIONS (16px PADDING)
     # ---------------------------------------------------------
     def _build_section6_options(self):
-        self.card_options = AutoRoundedCard(self.main_container, bg_color=M3_SURFACE_CONTAINER_LOW, radius=16, pad_x=24, pad_y=16)
+        self.card_options = AutoRoundedCard(self.main_container, bg_color=M3_SURFACE_CONTAINER_LOW, radius=16, pad_x=16, pad_y=16)
         self.card_options.pack(fill="x")
 
         inner = self.card_options.inner

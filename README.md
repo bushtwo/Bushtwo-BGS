@@ -36,7 +36,7 @@ python main.py
 
 ## 🖥️ User Interface Layout
 
-Bushtwo BGS uses a **16px Spacing System** with **24px internal card padding**, **16px rounded corners**, borderless components, and adaptive monitor scaling:
+Bushtwo BGS uses a **16px Spacing System** with **16px internal card padding**, **16px rounded corners**, borderless components, and adaptive monitor scaling:
 
 ```
 ┌────────────────────────────────────────────────────────┐
