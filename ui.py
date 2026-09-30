@@ -179,13 +179,40 @@ class RoundedPopupMenu:
         self.active_fg = active_fg
         self.radius = radius
         self.top = None
+        self._bind_id = None
+
+    def is_open(self) -> bool:
+        return self.top is not None and self.top.winfo_exists()
+
+    def dismiss(self):
+        if self._bind_id:
+            try:
+                self.parent.winfo_toplevel().unbind("<Button-1>", self._bind_id)
+            except Exception:
+                pass
+            self._bind_id = None
+
+        if self.top is not None:
+            top = self.top
+            self.top = None
+            if top.winfo_exists():
+                try:
+                    top.destroy()
+                except Exception:
+                    pass
 
     def show(self, x, y):
-        if self.top and self.top.winfo_exists():
-            self.top.destroy()
+        if self.is_open():
+            self.dismiss()
+            return
+
+        toplevel_parent = self.parent.winfo_toplevel()
 
         self.top = tk.Toplevel(self.parent)
+        self.top.withdraw()
         self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+        self.top.transient(toplevel_parent)
         self.top.configure(bg=self.bg)
 
         # 16px tblr padding container
@@ -196,7 +223,7 @@ class RoundedPopupMenu:
             row = tk.Label(
                 container,
                 text=f"  {val}",
-                font=(FONT_FAMILY, 9.5),
+                font=(FONT_FAMILY, 10),
                 bg=self.bg,
                 fg=self.fg,
                 anchor="w",
@@ -212,9 +239,8 @@ class RoundedPopupMenu:
                 def _enter(e): r.configure(bg=self.active_bg, fg=self.active_fg)
                 def _leave(e): r.configure(bg=self.bg, fg=self.fg)
                 def _click(e):
+                    self.dismiss()
                     self.callback(v)
-                    if self.top and self.top.winfo_exists():
-                        self.top.destroy()
                 r.bind("<Enter>", _enter)
                 r.bind("<Leave>", _leave)
                 r.bind("<Button-1>", _click)
@@ -225,12 +251,16 @@ class RoundedPopupMenu:
         w = max(self.width, self.top.winfo_reqwidth())
         h = self.top.winfo_reqheight()
 
-        # Adjust position if it exceeds bottom of screen
+        # Adjust position if it exceeds bottom or right edge of screen
+        screen_w = self.top.winfo_screenwidth()
         screen_h = self.top.winfo_screenheight()
+        if x + w > screen_w - 20:
+            x = max(10, screen_w - w - 20)
         if y + h > screen_h - 40:
             y = max(10, y - h - 36)
 
         self.top.geometry(f"{w}x{h}+{x}+{y}")
+        self.top.deiconify()
         self.top.update_idletasks()
 
         # Win32 clipping region: clips entire window to 16px rounded rectangle so corners are 100% transparent
@@ -244,36 +274,19 @@ class RoundedPopupMenu:
             except Exception as e:
                 print(f"Could not apply rounded region to popup: {e}")
 
-        # Auto-dismiss on click outside
-        def _check_click_outside(event):
-            if self.top and self.top.winfo_exists():
-                px, py = self.top.winfo_pointerxy()
-                rx = self.top.winfo_rootx()
-                ry = self.top.winfo_rooty()
-                rw = self.top.winfo_width()
-                rh = self.top.winfo_height()
-                if not (rx <= px <= rx + rw and ry <= py <= ry + rh):
-                    self.top.destroy()
-
-        toplevel_parent = self.parent.winfo_toplevel()
-        toplevel_parent.bind("<Button-1>", _check_click_outside, add="+")
-
-        def _on_focus_out(e):
-            if self.top and self.top.winfo_exists():
-                self.top.after(120, self._maybe_destroy)
-
-        self.top.bind("<FocusOut>", _on_focus_out)
-        self.top.focus_set()
-
-    def _maybe_destroy(self):
-        if self.top and self.top.winfo_exists():
-            px, py = self.top.winfo_pointerxy()
+        # Auto-dismiss on click outside (bound to toplevel_parent without focus grab)
+        def _on_outside_click(event):
+            if not self.is_open():
+                return
             rx = self.top.winfo_rootx()
             ry = self.top.winfo_rooty()
             rw = self.top.winfo_width()
             rh = self.top.winfo_height()
-            if not (rx <= px <= rx + rw and ry <= py <= ry + rh):
-                self.top.destroy()
+            if not (rx <= event.x_root <= rx + rw and ry <= event.y_root <= ry + rh):
+                self.dismiss()
+
+        self._bind_id = toplevel_parent.bind("<Button-1>", _on_outside_click, add="+")
+        self.top.bind("<Escape>", lambda e: self.dismiss())
 
 
 class M3RoundedDropdown(tk.Frame):
@@ -328,9 +341,14 @@ class M3RoundedDropdown(tk.Frame):
             w.bind("<Leave>", self._on_leave)
 
     def _show_popup(self, event=None):
+        if self.popup.is_open():
+            self.popup.dismiss()
+            return "break"
         x = self.winfo_rootx()
         y = self.winfo_rooty() + self.btn_height + 4
+        self.popup.width = max(self.winfo_width(), 240)
         self.popup.show(x, y)
+        return "break"
 
     def _on_select(self, val):
         self.variable.set(val)
@@ -1051,25 +1069,25 @@ class WallpaperSwitcherUI:
 
         next_wp = self.playlist.get_next_wallpaper()
         if next_wp and os.path.exists(next_wp):
-            success = self.engine.set_wallpaper(next_wp, self.scaling_mode)
-            if success:
-                self.current_wallpaper_path = next_wp
-                self.config_mgr.set("last_wallpaper", next_wp)
-                self.config_mgr.set("history", self.playlist.history)
-                self._update_current_wallpaper_display(next_wp)
-                self.time_remaining = self._get_initial_time_remaining()
-                self._update_timer_badge()
+            old_wp = self.current_wallpaper_path
+            self.current_wallpaper_path = next_wp
+            self.config_mgr.set("last_wallpaper", next_wp)
+            self.config_mgr.set("history", self.playlist.history)
+            self._update_current_wallpaper_display(next_wp)
+            self.time_remaining = self._get_initial_time_remaining()
+            self._update_timer_badge()
+            self.engine.fade_transition(old_wp, next_wp, self.scaling_mode, duration=1.0)
 
     def action_previous(self):
         prev_wp = self.playlist.get_previous_wallpaper()
         if prev_wp and os.path.exists(prev_wp):
-            success = self.engine.set_wallpaper(prev_wp, self.scaling_mode)
-            if success:
-                self.current_wallpaper_path = prev_wp
-                self.config_mgr.set("last_wallpaper", prev_wp)
-                self._update_current_wallpaper_display(prev_wp)
-                self.time_remaining = self._get_initial_time_remaining()
-                self._update_timer_badge()
+            old_wp = self.current_wallpaper_path
+            self.current_wallpaper_path = prev_wp
+            self.config_mgr.set("last_wallpaper", prev_wp)
+            self._update_current_wallpaper_display(prev_wp)
+            self.time_remaining = self._get_initial_time_remaining()
+            self._update_timer_badge()
+            self.engine.fade_transition(old_wp, prev_wp, self.scaling_mode, duration=1.0)
 
     def action_toggle_pause(self):
         self.is_paused = not self.is_paused
@@ -1270,6 +1288,10 @@ class WallpaperSwitcherUI:
             self.exit_app()
 
     def hide_window(self):
+        if hasattr(self, 'dd_scaling') and hasattr(self.dd_scaling, 'popup'):
+            self.dd_scaling.popup.dismiss()
+        if hasattr(self, 'dd_timer') and hasattr(self.dd_timer, 'popup'):
+            self.dd_timer.popup.dismiss()
         self.root.withdraw()
 
     def show_window(self):
@@ -1278,6 +1300,10 @@ class WallpaperSwitcherUI:
         self.root.focus_force()
 
     def exit_app(self):
+        if hasattr(self, 'dd_scaling') and hasattr(self.dd_scaling, 'popup'):
+            self.dd_scaling.popup.dismiss()
+        if hasattr(self, 'dd_timer') and hasattr(self.dd_timer, 'popup'):
+            self.dd_timer.popup.dismiss()
         if self.tray:
             self.tray.stop()
         self.root.destroy()
