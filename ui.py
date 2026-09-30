@@ -420,6 +420,7 @@ class WallpaperSwitcherUI:
         self.root = root
         self.config_mgr = config_mgr
         self.engine = wallpaper_engine
+        self.engine.root = self.root
         self.playlist = playlist_mgr
         self.tray = tray_mgr
 
@@ -1076,7 +1077,7 @@ class WallpaperSwitcherUI:
             self._update_current_wallpaper_display(next_wp)
             self.time_remaining = self._get_initial_time_remaining()
             self._update_timer_badge()
-            self.engine.fade_transition(old_wp, next_wp, self.scaling_mode, duration=1.0)
+            self.engine.fade_transition(old_wp, next_wp, self.scaling_mode, duration=0.5)
 
     def action_previous(self):
         prev_wp = self.playlist.get_previous_wallpaper()
@@ -1087,7 +1088,7 @@ class WallpaperSwitcherUI:
             self._update_current_wallpaper_display(prev_wp)
             self.time_remaining = self._get_initial_time_remaining()
             self._update_timer_badge()
-            self.engine.fade_transition(old_wp, prev_wp, self.scaling_mode, duration=1.0)
+            self.engine.fade_transition(old_wp, prev_wp, self.scaling_mode, duration=0.5)
 
     def action_toggle_pause(self):
         self.is_paused = not self.is_paused
