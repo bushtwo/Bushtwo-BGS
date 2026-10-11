@@ -2,7 +2,6 @@ import os
 import sys
 import time
 import math
-import threading
 import ctypes
 from ctypes import wintypes
 import winreg
@@ -124,9 +123,6 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
         os.makedirs(self.cache_dir, exist_ok=True)
         self.cached_wallpaper_path = os.path.join(self.cache_dir, 'active_wallpaper.bmp')
         self.root = None
-        self._active_overlay = None
-        self._fade_anim_id = None
-        self._fade_cleanup_id = None
 
     def get_display_info(self) -> dict:
         """Gets primary display resolution, refresh rate, and color depth."""
@@ -217,8 +213,11 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
 
     def _set_wallpaper_com(self, image_path: str, scaling_mode: str = 'Fill') -> bool:
         """Sets wallpaper via modern IDesktopWallpaper COM interface to trigger smooth DWM cross-fade transition."""
+        pWallpaper = ctypes.c_void_p()
+        com_initialized = False
         try:
-            ctypes.windll.ole32.CoInitialize(None)
+            hr_init = ctypes.windll.ole32.CoInitialize(None)
+            com_initialized = hr_init in (0, 1)
 
             class GUID(ctypes.Structure):
                 _fields_ = [
@@ -246,26 +245,33 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
 
             vtable = ctypes.cast(pWallpaper, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
 
-            # SetPosition (only if changed to avoid unnecessary Explorer reposition/redraw)
+            # Read the actual Windows position; another app may have changed it.
             DWPO_MAP = {'Center': 0, 'Tile': 1, 'Stretch': 2, 'Fit': 3, 'Fill': 4, 'Span': 5}
             pos_val = DWPO_MAP.get(scaling_mode, 4)
-            if getattr(self, '_last_pos_val', None) != pos_val:
+            current_pos = ctypes.c_int()
+            GetPosition = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int))(vtable[11])
+            hr_pos = GetPosition(pWallpaper, ctypes.byref(current_pos))
+            if hr_pos < 0 or current_pos.value != pos_val:
                 SetPosition = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_int)(vtable[10])
-                SetPosition(pWallpaper, pos_val)
-                self._last_pos_val = pos_val
+                if SetPosition(pWallpaper, pos_val) < 0:
+                    return False
 
             # SetWallpaper(this, monitorID=None, path) -> triggers smooth Windows DWM crossfade
             abs_path = os.path.abspath(image_path)
             SetWallpaper = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p)(vtable[3])
             hr_set = SetWallpaper(pWallpaper, None, abs_path)
 
-            Release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
-            Release(pWallpaper)
-
             return hr_set == 0
         except Exception as e:
             print(f"IDesktopWallpaper COM transition notice: {e}")
             return False
+        finally:
+            if pWallpaper.value:
+                vtable = ctypes.cast(pWallpaper, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+                Release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
+                Release(pWallpaper)
+            if com_initialized:
+                ctypes.windll.ole32.CoUninitialize()
 
     def set_wallpaper(self, image_path: str, scaling_mode: str = 'Fill') -> bool:
         """Sets desktop wallpaper natively (fallback for direct sets without fade)."""
@@ -282,140 +288,165 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
                     target_path = self.cached_wallpaper_path
             except Exception: pass
         
-        self._apply_scaling_registry(scaling_mode)
         if self._set_wallpaper_com(target_path, scaling_mode): return True
+        self._apply_scaling_registry(scaling_mode)
         try:
             return bool(ctypes.windll.user32.SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, target_path, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE))
         except Exception: return False
 
+    def _wallpaper_layer(self):
+        """Ask Explorer for its wallpaper-only WorkerW, below the icon surface."""
+        u = ctypes.windll.user32
+        u.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        u.FindWindowW.restype = wintypes.HWND
+        u.FindWindowExW.argtypes = [wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR]
+        u.FindWindowExW.restype = wintypes.HWND
+        progman = u.FindWindowW('Progman', None)
+        u.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+        result = ctypes.c_size_t()
+        u.SendMessageTimeoutW(progman, 0x052c, 0, 0, 2, 1000, ctypes.byref(result))
+        layers = []
+        enum_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        @enum_type
+        def visit(hwnd, _):
+            if u.FindWindowExW(hwnd, None, 'SHELLDLL_DefView', None):
+                worker = u.FindWindowExW(None, hwnd, 'WorkerW', None)
+                if worker:
+                    layers.append(worker)
+            return True
+
+        u.EnumWindows.argtypes = [enum_type, wintypes.LPARAM]
+        u.EnumWindows(visit, 0)
+        return layers[0] if layers else u.FindWindowExW(progman, None, 'WorkerW', None)
+
     def fade_transition(self, old_path: str, new_path: str, scaling_mode: str = 'Fill', duration: float = 0.5, callback=None):
-        if not new_path or not os.path.exists(new_path): return
-        if not old_path or not os.path.exists(old_path) or os.path.abspath(old_path) == os.path.abspath(new_path):
-            self.set_wallpaper(new_path, scaling_mode)
-            if callback: callback()
+        """Composite the new image in Explorer's wallpaper layer over 500 ms."""
+        if not new_path or not os.path.exists(new_path):
             return
-
-        if getattr(self, 'root', None) and self.root.winfo_exists():
-            self._fade_overlay_transition(new_path, scaling_mode, duration, callback)
-            return
-
-        self.set_wallpaper(new_path, scaling_mode)
-        if callback: callback()
-
-    def _fade_overlay_transition(self, new_path: str, scaling_mode: str, duration: float, callback):
+        self._cancel_fade()
+        top = None
         try:
+            if not self.root or duration <= 0:
+                self.set_wallpaper(new_path, scaling_mode)
+                if callback:
+                    callback()
+                return
             import tkinter as tk
             from PIL import ImageTk
-
-            if getattr(self, '_fade_anim_id', None):
-                try: self.root.after_cancel(self._fade_anim_id)
-                except Exception: pass
-                self._fade_anim_id = None
-
-            if getattr(self, '_fade_cleanup_id', None):
-                try: self.root.after_cancel(self._fade_cleanup_id)
-                except Exception: pass
-                self._fade_cleanup_id = None
-
-            if getattr(self, '_active_overlay', None) and self._active_overlay.winfo_exists():
-                try: self._active_overlay.destroy()
-                except Exception: pass
-                self._active_overlay = None
-
+            u = ctypes.windll.user32
+            parent = self._wallpaper_layer()
+            if not parent:
+                raise RuntimeError('Explorer wallpaper layer unavailable')
             disp = self.get_display_info()
-            sw = disp.get('width', 1920)
-            sh = disp.get('height', 1080)
-
-            # Pre-render perfectly cropped image to screen dimensions
+            sw, sh = disp['width'], disp['height']
+            x, y = 0, 0
+            if scaling_mode == 'Span':
+                sw, sh = u.GetSystemMetrics(78), u.GetSystemMetrics(79)
+                x, y = u.GetSystemMetrics(76), u.GetSystemMetrics(77)
+            origin = wintypes.POINT(x, y)
+            u.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+            u.ScreenToClient(parent, ctypes.byref(origin))
             with Image.open(new_path) as im:
-                img_rendered = _render_scaled_image(im, sw, sh, scaling_mode)
-            img_rendered.save(self.cached_wallpaper_path, 'BMP')
-
-            # Create invisible overlay window
+                rendered = _render_scaled_image(im, sw, sh, scaling_mode)
+            self._fade_serial = getattr(self, '_fade_serial', 0) + 1
+            path = os.path.join(self.cache_dir, f'fade_{os.getpid()}_{self._fade_serial}.bmp')
+            rendered.save(path, 'BMP')
             top = tk.Toplevel(self.root)
             top.withdraw()
             top.overrideredirect(True)
+            # Tk restores its own alpha when mapping the wrapper. Set Tk's
+            # initial opacity too, or deiconify briefly reveals the next image.
             top.attributes('-alpha', 0.0)
             top.geometry(f'{sw}x{sh}+0+0')
-            self._active_overlay = top
-
-            photo = ImageTk.PhotoImage(img_rendered)
-            lbl = tk.Label(top, image=photo, bd=0, highlightthickness=0, bg='black')
-            lbl.photo = photo
-            lbl.pack(fill='both', expand=True)
+            photo = ImageTk.PhotoImage(rendered)
+            label = tk.Label(top, image=photo, bd=0, highlightthickness=0)
+            label.photo = photo
+            label.pack(fill='both', expand=True)
             top.update_idletasks()
-
-            HWND_BOTTOM = 1
-            SWP_NOACTIVATE = 0x0010
-            SWP_SHOWWINDOW = 0x0040
-            GWL_EXSTYLE = -20
-            WS_EX_TRANSPARENT = 0x00000020
-            WS_EX_LAYERED = 0x00080000
-            WS_EX_TOOLWINDOW = 0x00000080
-            WS_EX_NOACTIVATE = 0x08000000
-
-            hwnd = int(top.wm_frame(), 16) if hasattr(top, 'wm_frame') else (ctypes.windll.user32.GetParent(top.winfo_id()) or top.winfo_id())
-            old_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, old_style | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
-            ctypes.windll.user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, sw, sh, SWP_NOACTIVATE)
-
+            hwnd = int(top.wm_frame(), 16)
+            u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+            u.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+            u.SetWindowLongW(hwnd, -16, (u.GetWindowLongW(hwnd, -16) & ~0x80000000) | 0x40000000)
+            u.SetWindowLongW(hwnd, -20, u.GetWindowLongW(hwnd, -20) | 0x80000 | 0x20 | 0x08000000)
+            set_parent = ctypes.WinDLL('user32', use_last_error=True).SetParent
+            set_parent.argtypes = [wintypes.HWND, wintypes.HWND]
+            set_parent.restype = wintypes.HWND
+            ctypes.set_last_error(0)
+            if not set_parent(hwnd, parent) and ctypes.get_last_error():
+                raise ctypes.WinError(ctypes.get_last_error())
+            u.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.DWORD, wintypes.BYTE, wintypes.DWORD]
+            u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            if not u.SetLayeredWindowAttributes(hwnd, 0, 0, 2):
+                raise RuntimeError('Wallpaper opacity unavailable')
             top.deiconify()
-            ctypes.windll.user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, sw, sh, SWP_NOACTIVATE | SWP_SHOWWINDOW)
+            if not u.SetWindowPos(hwnd, 1, origin.x, origin.y, sw, sh, 0x10 | 0x40 | 0x20):
+                raise RuntimeError('Wallpaper layer placement failed')
+            self._active_overlay = top
+            self._fade_target = (path, scaling_mode)
+            started = time.monotonic()
 
-            step = [0]
-            total_steps = max(10, int(duration * 50))
-            interval_ms = max(10, int((duration * 1000) / total_steps))
-            wp_set_triggered = [False]
-            
-            def _set_instant_wallpaper():
-                # INSTANT BACKGROUND SWAP: bypasses COM slide animations by using legacy SPI!
-                self._apply_scaling_registry('Center')
-                try:
-                    ctypes.windll.user32.SystemParametersInfoW(
-                        SPI_SETDESKWALLPAPER, 0, self.cached_wallpaper_path, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
-                    )
-                except Exception: pass
-
-            def _step_animation():
-                if not top.winfo_exists(): return
-                step[0] += 1
-                t_norm = step[0] / float(total_steps)
-                alpha = 0.5 * (1.0 - math.cos(math.pi * t_norm))
-                if alpha > 1.0: alpha = 1.0
-
-                try: top.attributes('-alpha', alpha)
-                except Exception: pass
-
-                if step[0] >= int(total_steps * 0.8) and not wp_set_triggered[0]:
-                    wp_set_triggered[0] = True
-                    threading.Thread(target=_set_instant_wallpaper, daemon=True).start()
-
-                if step[0] < total_steps:
-                    self._fade_anim_id = self.root.after(interval_ms, _step_animation)
+            def animate():
+                self._fade_anim_id = None
+                progress = min(1.0, (time.monotonic() - started) / duration)
+                alpha = round(255 * (1.0 - math.cos(math.pi * progress)) / 2.0)
+                # Keep Tk's stored alpha in sync with the native window so a
+                # shell settings refresh cannot restore an obsolete opacity.
+                top.attributes('-alpha', alpha / 255.0)
+                if progress < 1.0:
+                    self._fade_anim_id = self.root.after(16, animate)
                 else:
-                    self._fade_anim_id = None
-                    try: top.attributes('-alpha', 1.0)
-                    except Exception: pass
+                    # Commit the identical pre-scaled bitmap under the opaque fade.
+                    # This avoids any change of crop or scaling at the handoff.
+                    self._commit_fade()
+                    self._fade_anim_id = self.root.after(1000, finish)
 
-                    if not wp_set_triggered[0]:
-                        wp_set_triggered[0] = True
-                        threading.Thread(target=_set_instant_wallpaper, daemon=True).start()
+            def finish():
+                self._cancel_fade()
+                if callback:
+                    callback()
 
-                    def _destroy_overlay():
-                        try: top.destroy()
-                        except Exception: pass
-                        if getattr(self, '_active_overlay', None) == top: self._active_overlay = None
-                        self._fade_cleanup_id = None
-                        if callback: callback()
-
-                    self._fade_cleanup_id = self.root.after(1200, _destroy_overlay)
-
-            self._fade_anim_id = self.root.after(interval_ms, _step_animation)
-
+            self._fade_anim_id = self.root.after(16, animate)
         except Exception as e:
-            print(f"Overlay fade notice: {e}")
+            with open(os.path.join(self.cache_dir, 'fade_error.log'), 'a', encoding='utf-8') as log:
+                log.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")}: {e}\n')
+            self._cancel_fade()
+            if top is not None and top.winfo_exists():
+                top.destroy()
             self.set_wallpaper(new_path, scaling_mode)
-            if callback: callback()
+            if callback:
+                callback()
+
+    def _commit_fade(self):
+        target = getattr(self, '_fade_target', None)
+        if target:
+            path, mode = target
+            # COM SetWallpaper starts another Windows crossfade. Commit via SPI
+            # while the new image is opaque, without broadcasting a shell redraw.
+            self._apply_scaling_registry(mode)
+            committed = bool(ctypes.windll.user32.SystemParametersInfoW(
+                SPI_SETDESKWALLPAPER, 0, path, SPIF_UPDATEINIFILE
+            ))
+            if committed:
+                previous = getattr(self, '_fade_frame_path', None)
+                self._fade_frame_path = path
+                if previous and previous != path:
+                    try:
+                        os.remove(previous)
+                    except OSError:
+                        pass
+            self._fade_target = None
+
+    def _cancel_fade(self):
+        anim = getattr(self, '_fade_anim_id', None)
+        if anim is not None and self.root:
+            self.root.after_cancel(anim)
+        self._fade_anim_id = None
+        self._commit_fade()
+        top = getattr(self, '_active_overlay', None)
+        if top is not None and top.winfo_exists():
+            top.destroy()
+        self._active_overlay = None
 
     def is_startup_enabled(self) -> bool:
         """Checks if startup entry exists and points to a valid file in HKCU Run registry."""

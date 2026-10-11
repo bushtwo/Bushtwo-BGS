@@ -854,10 +854,11 @@ class WallpaperSwitcherUI:
     def _build_section5_scaling_and_timer_side_by_side(self):
         row_frame = tk.Frame(self.main_container, bg=M3_SURFACE)
         row_frame.pack(fill="x", pady=(0, 16))
+        row_frame.grid_columnconfigure((0, 1), weight=1, uniform="settings")
 
         # ---- LEFT COLUMN: SCALING MODE (16px padding inside) ----
         self.card_scaling = AutoRoundedCard(row_frame, radius=16, pad_x=16, pad_y=16)
-        self.card_scaling.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        self.card_scaling.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         inner_left = self.card_scaling.inner
 
@@ -895,7 +896,7 @@ class WallpaperSwitcherUI:
 
         # ---- RIGHT COLUMN: SHUFFLE TIMER (16px padding inside) ----
         self.card_timer = AutoRoundedCard(row_frame, radius=16, pad_x=16, pad_y=16)
-        self.card_timer.pack(side="right", fill="both", expand=True, padx=(8, 0))
+        self.card_timer.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
         inner_right = self.card_timer.inner
 
