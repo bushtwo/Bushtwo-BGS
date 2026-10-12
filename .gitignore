@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller outputs (keep the root release executable tracked)
+/build/
+/build-*/
+/dist/
+/dist-*/
+
+# Local settings and generated wallpaper/test caches
+.cache/
+/config.json
+/test_wp.bmp
+.pytest_cache/

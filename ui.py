@@ -536,7 +536,7 @@ class WallpaperSwitcherUI:
 
     def _setup_window(self):
         """Sets title, icons, adaptive fixed dimensions, and disables resizing."""
-        self.root.title("Bushtwo BGS")
+        self.root.title("Bushtwo BGS v1.03")
         self.root.configure(bg=M3_SURFACE)
         self.root.resizable(False, False)
 
