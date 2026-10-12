@@ -10,7 +10,7 @@ def generate_icons():
     icon_names = [
         'shuffle', 'skip-back', 'pause', 'play', 
         'folder-plus', 'trash', 'arrows-clockwise', 'desktop',
-        'folder', 'check-square', 'square'
+        'folder', 'check-square', 'square', 'radio-button', 'circle', 'radio-button-fill', 'circle-fill'
     ]
     colors = {
         'white': '#FFFFFF',

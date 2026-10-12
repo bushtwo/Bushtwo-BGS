@@ -304,7 +304,20 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
         progman = u.FindWindowW('Progman', None)
         u.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
         result = ctypes.c_size_t()
-        u.SendMessageTimeoutW(progman, 0x052c, 0, 0, 2, 1000, ctypes.byref(result))
+        # Recreating the shell wallpaper surface on every shuffle can cover a
+        # live animation. Only ask for a layer if the raised layout is absent.
+        if not u.FindWindowExW(progman, None, 'WorkerW', None):
+            u.SendMessageTimeoutW(progman, 0x052c, 0xD, 1, 2, 1000, ctypes.byref(result))
+        # Windows 11's newer shell keeps WorkerW inside Progman. The animated
+        # surface belongs between the icon view and that wallpaper WorkerW.
+        child_worker = u.FindWindowExW(progman, None, 'WorkerW', None)
+        icons = u.FindWindowExW(progman, None, 'SHELLDLL_DefView', None)
+        if child_worker and icons:
+            self._wallpaper_insert_after = icons
+            u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            u.SetWindowPos(child_worker, 1, 0, 0, 0, 0, 0x01 | 0x02 | 0x10)
+            return progman
+        self._wallpaper_insert_after = 0
         layers = []
         enum_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -325,6 +338,7 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
         if not new_path or not os.path.exists(new_path):
             return
         self._cancel_fade()
+        self._freeze_zoom()
         top = None
         try:
             if not self.root or duration <= 0:
@@ -332,8 +346,7 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
                 if callback:
                     callback()
                 return
-            import tkinter as tk
-            from PIL import ImageTk
+            from animated_surface import AnimatedSurface as NativeZoom
             u = ctypes.windll.user32
             parent = self._wallpaper_layer()
             if not parent:
@@ -352,41 +365,14 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
             self._fade_serial = getattr(self, '_fade_serial', 0) + 1
             path = os.path.join(self.cache_dir, f'fade_{os.getpid()}_{self._fade_serial}.bmp')
             rendered.save(path, 'BMP')
-            top = tk.Toplevel(self.root)
-            top.withdraw()
-            top.overrideredirect(True)
-            # Tk restores its own alpha when mapping the wrapper. Set Tk's
-            # initial opacity too, or deiconify briefly reveals the next image.
-            top.attributes('-alpha', 0.0)
-            top.geometry(f'{sw}x{sh}+0+0')
-            photo = ImageTk.PhotoImage(rendered)
-            label = tk.Label(top, image=photo, bd=0, highlightthickness=0)
-            label.photo = photo
-            label.pack(fill='both', expand=True)
-            top.update_idletasks()
-            hwnd = int(top.wm_frame(), 16)
-            u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
-            u.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
-            u.SetWindowLongW(hwnd, -16, (u.GetWindowLongW(hwnd, -16) & ~0x80000000) | 0x40000000)
-            u.SetWindowLongW(hwnd, -20, u.GetWindowLongW(hwnd, -20) | 0x80000 | 0x20 | 0x08000000)
-            set_parent = ctypes.WinDLL('user32', use_last_error=True).SetParent
-            set_parent.argtypes = [wintypes.HWND, wintypes.HWND]
-            set_parent.restype = wintypes.HWND
-            ctypes.set_last_error(0)
-            if not set_parent(hwnd, parent) and ctypes.get_last_error():
-                raise ctypes.WinError(ctypes.get_last_error())
-            u.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.DWORD, wintypes.BYTE, wintypes.DWORD]
-            u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
-            if not u.SetLayeredWindowAttributes(hwnd, 0, 0, 2):
-                raise RuntimeError('Wallpaper opacity unavailable')
-            top.deiconify()
-            if not u.SetWindowPos(hwnd, 1, origin.x, origin.y, sw, sh, 0x10 | 0x40 | 0x20):
-                raise RuntimeError('Wallpaper layer placement failed')
+            motion_effect = getattr(self, '_zoom_effect', 'smooth') if getattr(self, '_zoom_enabled', False) else None
+            top = NativeZoom(parent, rendered, origin.x, origin.y, opacity=0.0, effect=motion_effect)
             self._active_overlay = top
             self._fade_target = (path, scaling_mode)
             started = time.monotonic()
 
             def animate():
+                nonlocal top
                 self._fade_anim_id = None
                 progress = min(1.0, (time.monotonic() - started) / duration)
                 alpha = round(255 * (1.0 - math.cos(math.pi * progress)) / 2.0)
@@ -398,13 +384,27 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
                 else:
                     # Commit the identical pre-scaled bitmap under the opaque fade.
                     # This avoids any change of crop or scaling at the handoff.
+                    top.wait_alpha()
                     self._commit_fade()
+                    if not top.winfo_exists():
+                        top.destroy()
+                        parent = self._wallpaper_layer()
+                        top = NativeZoom(parent, rendered, origin.x, origin.y, opacity=1.0, effect=motion_effect)
+                        self._active_overlay = top
+                    self.stop_zoom(commit=False)
+                    if getattr(self, '_zoom_enabled', False):
+                        try:
+                            self._start_zoom(top, None, rendered, time.monotonic())
+                        except Exception as error:
+                            self.stop_zoom()
+                            with open(os.path.join(self.cache_dir, 'fade_error.log'), 'a', encoding='utf-8') as log:
+                                log.write(f'Zoom initialization stopped: {error}\n')
+                    if callback:
+                        callback()
                     self._fade_anim_id = self.root.after(1000, finish)
 
             def finish():
                 self._cancel_fade()
-                if callback:
-                    callback()
 
             self._fade_anim_id = self.root.after(16, animate)
         except Exception as e:
@@ -421,6 +421,17 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
         target = getattr(self, '_fade_target', None)
         if target:
             path, mode = target
+            if getattr(self, '_zoom_enabled', False):
+                # SPI causes Explorer to asynchronously raise its static WorkerW
+                # above the live surface ~1s later. Keep motion in our cached
+                # surfaces; synchronize the static desktop when motion stops.
+                previous = getattr(self, '_deferred_wallpaper', None)
+                self._deferred_wallpaper = target
+                self._fade_target = None
+                if previous and previous[0] != path:
+                    try:os.remove(previous[0])
+                    except OSError:pass
+                return
             # COM SetWallpaper starts another Windows crossfade. Commit via SPI
             # while the new image is opaque, without broadcasting a shell redraw.
             self._apply_scaling_registry(mode)
@@ -428,6 +439,13 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
                 SPI_SETDESKWALLPAPER, 0, path, SPIF_UPDATEINIFILE
             ))
             if committed:
+                # Do not reinitialize Explorer after a commit: that can restore
+                # an old background texture. Only keep its existing WorkerW low.
+                u = ctypes.windll.user32
+                progman = u.FindWindowW('Progman', None)
+                worker = u.FindWindowExW(progman, None, 'WorkerW', None)
+                if worker:
+                    u.SetWindowPos(worker, 1, 0, 0, 0, 0, 0x01 | 0x02 | 0x10)
                 previous = getattr(self, '_fade_frame_path', None)
                 self._fade_frame_path = path
                 if previous and previous != path:
@@ -437,6 +455,15 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
                         pass
             self._fade_target = None
 
+    def _commit_deferred_wallpaper(self):
+        target = getattr(self, '_deferred_wallpaper', None)
+        if target:
+            path, mode = target
+            self._apply_scaling_registry(mode)
+            if ctypes.windll.user32.SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, path, SPIF_UPDATEINIFILE):
+                self._deferred_wallpaper = None
+                self._fade_frame_path = path
+
     def _cancel_fade(self):
         anim = getattr(self, '_fade_anim_id', None)
         if anim is not None and self.root:
@@ -444,9 +471,59 @@ class WindowsWallpaperEngine(WallpaperEngineBase):
         self._fade_anim_id = None
         self._commit_fade()
         top = getattr(self, '_active_overlay', None)
-        if top is not None and top.winfo_exists():
+        if top is not None and top is not getattr(self, '_zoom_overlay', None) and top.winfo_exists():
             top.destroy()
         self._active_overlay = None
+
+    def configure_zoom(self, enabled, mode, timer_mode, interval, paused, image_path, effect="smooth"):
+        eligible = bool(enabled and mode == 'Fill' and timer_mode == 'interval' and interval in (5, 15, 30))
+        active = getattr(self, '_active_overlay', None)
+        if active and not active.winfo_exists():
+            self._cancel_fade()
+        zoom = getattr(self, '_zoom_overlay', None)
+        if zoom and not zoom.winfo_exists():
+            self.stop_zoom()
+        effect = effect if effect in ('pulse', 'smooth') else 'smooth'
+        changed = eligible != getattr(self, '_zoom_enabled', False) or interval != getattr(self, '_zoom_interval', interval) or effect != getattr(self, '_zoom_effect', effect)
+        self._zoom_effect = effect
+        self._zoom_enabled, self._zoom_interval = eligible, interval
+        was_paused = getattr(self, '_zoom_paused', False)
+        self._zoom_paused = paused
+        if not eligible:
+            self.stop_zoom()
+            return
+        if paused and not was_paused:
+            self._freeze_zoom()
+        elif was_paused and not paused and getattr(self, '_zoom_overlay', None):
+            self._zoom_started = time.monotonic() - self._zoom_elapsed
+            self._zoom_overlay.resume()
+        if changed and getattr(self, '_active_overlay', None):
+            self._cancel_fade()
+        if (changed or not getattr(self, '_zoom_overlay', None)) and not getattr(self, '_active_overlay', None):
+            if image_path and os.path.exists(image_path):
+                self.fade_transition(image_path, image_path, mode, duration=0.001)
+
+    def _freeze_zoom(self):
+        surface = getattr(self, '_zoom_overlay', None)
+        if surface:
+            surface.pause()
+            self._zoom_elapsed = surface.elapsed
+        self._zoom_after = None
+
+    def stop_zoom(self, commit=True):
+        self._freeze_zoom()
+        if commit:self._commit_deferred_wallpaper()
+        top = getattr(self, '_zoom_overlay', None)
+        if top is not None:
+            top.destroy()
+        self._zoom_overlay = None
+        self._zoom_renderer = None
+
+    def _start_zoom(self, top, widget, rendered, started):
+        self._zoom_renderer = self._zoom_overlay = top
+        self._zoom_started, self._zoom_elapsed = started, 0.0
+        top.start_zoom(self._zoom_interval, getattr(self, '_zoom_effect', 'smooth'), self._zoom_paused)
+        self._zoom_after = None
 
     def is_startup_enabled(self) -> bool:
         """Checks if startup entry exists and points to a valid file in HKCU Run registry."""

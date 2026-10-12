@@ -407,6 +407,38 @@ class PhosphorCheckbox(tk.Frame):
             self.icon_label.config(image=self.unchecked_icon)
 
 
+class PhosphorRadio(PhosphorCheckbox):
+    """Radio selection with the same Phosphor colors and type as toggles."""
+    def __init__(self, parent, text, variable, value, checked_icon, unchecked_icon, command=None, **kwargs):
+        self.value=value;self._state='normal'
+        super().__init__(parent,text,variable,checked_icon,unchecked_icon,command=command,**kwargs)
+        self._trace=variable.trace_add('write',lambda *_:self._update_icon())
+        self.bind('<space>',self._toggle)
+        self.configure(takefocus=1)
+
+    def _toggle(self,event=None):
+        if self._state=='disabled':return
+        self.variable.set(self.value)
+        if self.command:self.command()
+
+    def _update_icon(self):
+        self.icon_label.configure(image=self.checked_icon if self.variable.get()==self.value else self.unchecked_icon)
+
+    def configure(self,cnf=None,**kwargs):
+        if 'state' in kwargs:
+            self._state=kwargs.pop('state')
+            self.text_label.configure(fg=M3_MUTED if self._state=='disabled' else M3_ON_SURFACE)
+            cursor='arrow' if self._state=='disabled' else 'hand2'
+            super().configure(cursor=cursor)
+            self.icon_label.configure(cursor=cursor)
+            self.text_label.configure(cursor=cursor)
+        return super().configure(cnf,**kwargs)
+
+    def destroy(self):
+        self.variable.trace_remove('write',self._trace)
+        super().destroy()
+
+
 class WallpaperSwitcherUI:
     """
     Bushtwo BGS - Material 3 User Interface
@@ -429,13 +461,18 @@ class WallpaperSwitcherUI:
         self.timer_mode = self.config_mgr.get("timer_mode", "interval")
         self.interval_seconds = self.config_mgr.get("interval_seconds", 300)
         self.scaling_mode = self.config_mgr.get("scaling_mode", "Fill")
+        self.zoom_style = tk.StringVar(value=self.config_mgr.get("zoom_style", "smooth"))
+        self._wallpaper_switching = False
+        self._shuffle_job = None
+        self._unreadable_wallpapers = {}
+        self.zoom_effect = tk.BooleanVar(value=self.config_mgr.get("zoom_effect", False))
         self.is_paused = self.config_mgr.get("is_paused", False)
         self.run_at_startup = tk.BooleanVar(value=self.engine.is_startup_enabled())
         self.close_to_tray = tk.BooleanVar(value=self.config_mgr.get("close_to_tray", True))
         self.include_subfolders = tk.BooleanVar(value=self.config_mgr.get("include_subfolders", True))
 
         self.time_remaining = self._get_initial_time_remaining()
-        self.last_tick_time = time.time()
+        self.last_tick_time = time.monotonic()
 
         # Cached icon images
         self.icons = {}
@@ -449,6 +486,8 @@ class WallpaperSwitcherUI:
         self._configure_m3_styles()
         self._build_ui_layout()
         self._populate_initial_state()
+        self._sync_zoom()
+        self._reset_playback_clock()
         self._start_timer_loop()
 
     # ---------------------------------------------------------
@@ -471,6 +510,8 @@ class WallpaperSwitcherUI:
             ("folder", "folder_primary_18.png"),
             ("check_checked", "check-square_primary_18.png"),
             ("check_unchecked", "square_muted_18.png"),
+            ("radio_checked", "radio-button-fill_primary_18.png"),
+            ("radio_unchecked", "circle-fill_muted_18.png"),
         ]
 
         for key, filename in icon_specs:
@@ -566,6 +607,7 @@ class WallpaperSwitcherUI:
 
         # 6. System & Background Options (16px gap from above)
         self._build_section6_options()
+        self._build_zoom_option()
 
         # Automatically size window to hug all sections perfectly
         self.root.update_idletasks()
@@ -962,7 +1004,7 @@ class WallpaperSwitcherUI:
             fg=M3_ON_SURFACE,
             command=self.on_startup_toggle
         )
-        self.cb_startup.pack(side="left")
+        self.cb_startup.pack(anchor="w", pady=(0, 16))
 
         self.cb_tray = PhosphorCheckbox(
             inner,
@@ -974,15 +1016,83 @@ class WallpaperSwitcherUI:
             fg=M3_ON_SURFACE,
             command=self.on_close_to_tray_toggle
         )
-        self.cb_tray.pack(side="right")
+        self.cb_tray.pack(anchor="w", pady=(0, 16))
 
     # ---------------------------------------------------------
     # STATE POPULATION & THUMBNAIL RENDERING
     # ---------------------------------------------------------
+    def _build_zoom_option(self):
+        self.cb_zoom = PhosphorCheckbox(
+            self.card_options.inner,
+            text="Zoom effect (Applies only in Fill mode with 5s, 15s or 30s shuffle timer)",
+            variable=self.zoom_effect,
+            checked_icon=self.icons.get("check_checked"),
+            unchecked_icon=self.icons.get("check_unchecked"),
+            bg=M3_SURFACE_CONTAINER_LOW, fg=M3_ON_SURFACE,
+            command=self.on_zoom_toggle
+        )
+        self.cb_zoom.pack(anchor="w")
+        self.zoom_choices = tk.Frame(self.card_options.inner, bg=M3_SURFACE_CONTAINER_LOW)
+        self.zoom_choices.pack(anchor="w", padx=(26, 0), pady=(12, 0))
+        self.zoom_radios = []
+        for text, value in (("Effect 1 — Lens pulse (once, 2 seconds)", "pulse"),
+                            ("Effect 2 — Smooth (5-second steps)", "smooth")):
+            radio = PhosphorRadio(self.zoom_choices, text=text, variable=self.zoom_style,
+                value=value, command=self.on_zoom_style_changed,
+                checked_icon=self.icons.get('radio_checked'), unchecked_icon=self.icons.get('radio_unchecked'),
+                bg=M3_SURFACE_CONTAINER_LOW, fg=M3_ON_SURFACE,
+                )
+            radio.pack(anchor="w", pady=(0, 8))
+            self.zoom_radios.append(radio)
+
+    def on_zoom_toggle(self):
+        self.config_mgr.set("zoom_effect", self.zoom_effect.get())
+        self._sync_zoom()
+        self._reset_playback_clock()
+
+    def on_zoom_style_changed(self):
+        self.config_mgr.set("zoom_style", self.zoom_style.get())
+        self._sync_zoom()
+        self._reset_playback_clock()
+
+    def _reset_playback_clock(self):
+        self.time_remaining = self._get_initial_time_remaining()
+        self.last_tick_time = time.monotonic()
+        self._update_timer_badge()
+        self._schedule_shuffle()
+
+    def _schedule_shuffle(self):
+        if self._shuffle_job is not None:
+            self.root.after_cancel(self._shuffle_job)
+        self._shuffle_job = None
+        if self.timer_mode == "interval" and not self.is_paused and not self._wallpaper_switching and self.playlist.has_images():
+            delay = max(1, int(self.time_remaining * 1000 + 0.5))
+            self._shuffle_job = self.root.after(delay, self._shuffle_due)
+
+    def _shuffle_due(self):
+        self._shuffle_job = None
+        if self.timer_mode == "interval" and not self.is_paused and not self._wallpaper_switching and self.playlist.has_images():
+            self.action_next()
+
+    def _wallpaper_ready(self):
+        self._wallpaper_switching = False
+        self._reset_playback_clock()
+
+    def _sync_zoom(self):
+        for radio in getattr(self, 'zoom_radios', []):
+            radio.configure(state='normal' if self.zoom_effect.get() else 'disabled')
+        if hasattr(self.engine, 'configure_zoom'):
+            self.engine.configure_zoom(self.zoom_effect.get(), self.scaling_mode,
+                                       self.timer_mode, self.interval_seconds,
+                                       self.is_paused, self.current_wallpaper_path, self.zoom_style.get())
+
     def _populate_initial_state(self):
         self._refresh_folders_treeview()
         if self.current_wallpaper_path and os.path.exists(self.current_wallpaper_path):
-            self._update_current_wallpaper_display(self.current_wallpaper_path)
+            if not self._update_current_wallpaper_display(self.current_wallpaper_path):
+                self.current_wallpaper_path = self.engine.get_current_system_wallpaper()
+                if not self._update_current_wallpaper_display(self.current_wallpaper_path):
+                    self._display_placeholder()
         else:
             self._display_placeholder()
         self._update_pause_ui()
@@ -1026,8 +1136,6 @@ class WallpaperSwitcherUI:
             return
 
         filename = os.path.basename(path)
-        self.wp_name_label.config(text=filename)
-
         try:
             with Image.open(path) as img:
                 orig_w, orig_h = img.size
@@ -1035,7 +1143,6 @@ class WallpaperSwitcherUI:
                 parent_dir = os.path.dirname(path)
 
                 sub_text = f"{orig_w} × {orig_h} • {file_size_mb:.1f} MB • {parent_dir}"
-                self.wp_sub_label.config(text=sub_text)
 
                 max_w = 500
                 max_h = self.preview_height
@@ -1054,47 +1161,75 @@ class WallpaperSwitcherUI:
                 rounded_thumb = make_rounded_thumbnail(img, target_w, target_h, radius=16)
                 self.preview_tk_image = ImageTk.PhotoImage(rounded_thumb)
                 self.preview_label.config(image=self.preview_tk_image, text="")
+                self.wp_name_label.config(text=filename)
+                self.wp_sub_label.config(text=sub_text)
         except Exception as e:
             print(f"Error loading preview for {path}: {e}")
-            self.wp_sub_label.config(text=f"Error loading preview: {e}")
+            return False
 
         if self.tray:
             self.tray.update_status(filename, self.is_paused)
+        return True
 
     # ---------------------------------------------------------
     # USER ACTIONS: PREV / NEXT / PAUSE / FOLDERS / DROPDOWNS
     # ---------------------------------------------------------
+    def _readable_wallpaper(self, previous=False):
+        choose = self.playlist.get_previous_wallpaper if previous else self.playlist.get_next_wallpaper
+        for _ in range(min(64, max(1, len(self.playlist.all_images)))):
+            path = choose()
+            if not path:
+                return None
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            if self._unreadable_wallpapers.get(path) == stamp:
+                continue
+            if self._update_current_wallpaper_display(path):
+                return path
+            self._unreadable_wallpapers[path] = stamp
+        return None
+
     def action_next(self):
         if not self.playlist.has_images():
             messagebox.showinfo("No Images", "Please add at least one folder containing images first.")
             return
 
-        next_wp = self.playlist.get_next_wallpaper()
+        next_wp = self._readable_wallpaper()
         if next_wp and os.path.exists(next_wp):
+            self._wallpaper_switching = True
+            self._schedule_shuffle()
             old_wp = self.current_wallpaper_path
             self.current_wallpaper_path = next_wp
             self.config_mgr.set("last_wallpaper", next_wp)
             self.config_mgr.set("history", self.playlist.history)
-            self._update_current_wallpaper_display(next_wp)
             self.time_remaining = self._get_initial_time_remaining()
             self._update_timer_badge()
-            self.engine.fade_transition(old_wp, next_wp, self.scaling_mode, duration=0.5)
+            self.engine.fade_transition(old_wp, next_wp, self.scaling_mode, duration=0.5, callback=self._wallpaper_ready)
 
     def action_previous(self):
-        prev_wp = self.playlist.get_previous_wallpaper()
+        prev_wp = self._readable_wallpaper(previous=True)
         if prev_wp and os.path.exists(prev_wp):
+            self._wallpaper_switching = True
+            self._schedule_shuffle()
             old_wp = self.current_wallpaper_path
             self.current_wallpaper_path = prev_wp
             self.config_mgr.set("last_wallpaper", prev_wp)
-            self._update_current_wallpaper_display(prev_wp)
             self.time_remaining = self._get_initial_time_remaining()
             self._update_timer_badge()
-            self.engine.fade_transition(old_wp, prev_wp, self.scaling_mode, duration=0.5)
+            self.engine.fade_transition(old_wp, prev_wp, self.scaling_mode, duration=0.5, callback=self._wallpaper_ready)
 
     def action_toggle_pause(self):
+        if not self.is_paused and self.timer_mode == "interval" and not self._wallpaper_switching:
+            self.time_remaining = max(0, self.time_remaining - (time.monotonic() - self.last_tick_time))
         self.is_paused = not self.is_paused
         self.config_mgr.set("is_paused", self.is_paused)
         self._update_pause_ui()
+        self._sync_zoom()
+        self.last_tick_time = time.monotonic()
+        self._schedule_shuffle()
         if self.tray:
             self.tray.update_status(os.path.basename(self.current_wallpaper_path or ""), self.is_paused)
 
@@ -1160,7 +1295,11 @@ class WallpaperSwitcherUI:
         self.scaling_desc_label.config(text=self._get_scaling_hint(mode))
 
         if self.current_wallpaper_path and os.path.exists(self.current_wallpaper_path):
+            if hasattr(self.engine, "stop_zoom"):
+                self.engine._cancel_fade()
+                self.engine.stop_zoom()
             self.engine.set_wallpaper(self.current_wallpaper_path, self.scaling_mode)
+        self._sync_zoom()
 
     def on_timer_dropdown_changed(self, selected_text: str):
         if "Day" in selected_text:
@@ -1177,6 +1316,8 @@ class WallpaperSwitcherUI:
 
         self.time_remaining = self._get_initial_time_remaining()
         self._update_timer_badge()
+        self._sync_zoom()
+        self._reset_playback_clock()
 
     def _parse_preset_seconds(self, text: str) -> int:
         presets_map = {
@@ -1222,11 +1363,11 @@ class WallpaperSwitcherUI:
         self._timer_tick()
 
     def _timer_tick(self):
-        now = time.time()
+        now = time.monotonic()
         elapsed = now - self.last_tick_time
         self.last_tick_time = now
 
-        if not self.is_paused and self.playlist.has_images():
+        if not self.is_paused and not self._wallpaper_switching and self.playlist.has_images():
             if self.timer_mode == "day":
                 now_dt = datetime.datetime.now()
                 today_str = now_dt.strftime("%Y-%m-%d")
@@ -1239,9 +1380,8 @@ class WallpaperSwitcherUI:
                 self._update_timer_badge()
             else:
                 self.time_remaining -= elapsed
-                if self.time_remaining <= 0:
-                    self.action_next()
-                    self.time_remaining = float(self.interval_seconds)
+                if self._shuffle_job is None:
+                    self._schedule_shuffle()
 
                 self._update_timer_badge()
 
@@ -1302,10 +1442,16 @@ class WallpaperSwitcherUI:
         self.root.focus_force()
 
     def exit_app(self):
+        if self._shuffle_job is not None:
+            self.root.after_cancel(self._shuffle_job)
+            self._shuffle_job = None
         if hasattr(self, 'dd_scaling') and hasattr(self.dd_scaling, 'popup'):
             self.dd_scaling.popup.dismiss()
         if hasattr(self, 'dd_timer') and hasattr(self.dd_timer, 'popup'):
             self.dd_timer.popup.dismiss()
+        if hasattr(self.engine, "stop_zoom"):
+            self.engine._cancel_fade()
+            self.engine.stop_zoom()
         if self.tray:
             self.tray.stop()
         self.root.destroy()

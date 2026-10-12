@@ -27,6 +27,12 @@ def capture():
     finally:u.ReleaseDC(None,dc)
 thread=threading.Thread(target=capture);thread.start();ready.wait()
 finished=[]
+commit_times=[]
+commit=e._commit_fade
+def record_commit():
+    if getattr(e,'_fade_target',None):commit_times.append(time.monotonic()-started)
+    return commit()
+e._commit_fade=record_commit
 try:
     time.sleep(0.15)
     e.fade_transition(original,str(p),mode,0.5,lambda:finished.append(time.monotonic()))
@@ -57,4 +63,5 @@ print('Samples:',len(samples),'baseline:',baseline,'largest backwards jump:',rou
 print('Regressions:',regressions[:12])
 assert not regressions,'Next wallpaper flashed or reverted during the actual handoff'
 assert values[-1]>0.99,'Final desktop does not retain next wallpaper'
+assert any(t<commit_times[0] and .05<blend(pixel)<.95 for t,pixel in samples),'Fade was not visible before the native handoff'
 print('Actual visible fade and native handoff passed; original wallpaper restored')

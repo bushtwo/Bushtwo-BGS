@@ -8,6 +8,8 @@ DEFAULT_CONFIG = {
     "timer_mode": "interval",      # "interval" or "day"
     "interval_seconds": 300,
     "scaling_mode": "Fill",
+    "zoom_effect": False,
+    "zoom_style": "smooth",
     "run_at_startup": False,
     "start_minimized": False,
     "close_to_tray": True,
