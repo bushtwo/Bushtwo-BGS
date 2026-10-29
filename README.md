@@ -1,168 +1,76 @@
-# 🌿 Bushtwo BGS
+# Bushtwo BGS
 
-> **A modern, lightweight, Material 3 wallpaper shuffle and desktop background manager for Windows.**
+A portable wallpaper shuffle and desktop background manager for Windows, with a Material Design 3 dark interface.
 
-Built for creators and designers who appreciate pixel precision, zero visual clutter, and clean system integration. Redesigned with Google's **Material Design 3 (M3)** visual language and **Phosphor Icons**.
+## Download
 
----
+[Download Bushtwo BGS for Windows (.exe)](https://github.com/bushtwo/Bushtwo-BGS/raw/refs/heads/main/Bushtwo%20BGS.exe)
 
-## ⚡ Quick Start
+Download the executable and double-click it to run. Python and installation are not required. Keep it in a writable folder so it can save your settings.
 
-### Option 1: Standalone Portable Executable (Recommended)
-1. Download or locate **`Bushtwo BGS.exe`**.
-2. **Double-click to run** — zero installation, zero dependencies, no console window.
-3. Add your wallpaper folders and enjoy seamless automated shuffling!
+## Screenshot
 
-> **Portable by design**: Place `Bushtwo BGS.exe` anywhere (Desktop, USB drive, portable tools folder). It saves `config.json` in the same directory.
+The following contact sheet from an existing screen recording shows the app and wallpaper transitions.
 
----
+![Bushtwo BGS wallpaper transition preview](docs/wallpaper-preview.jpg)
 
-### Option 2: Running from Source
-Requires Python 3.10+:
+## Getting started
 
-```bash
-# Clone the repository
-git clone https://github.com/your-username/bushtwo-bgs.git
-cd bushtwo-bgs
+1. Open `Bushtwo BGS.exe`.
+2. Add your wallpaper folders and choose whether to include subfolders.
+3. Select a scaling mode and shuffle interval.
+4. Use the playback controls to change wallpapers or pause shuffling.
+5. Enable Windows startup or close-to-tray behavior if desired.
 
-# Install dependencies
-pip install -r requirements.txt
+Settings are saved in `config.json` beside the executable. The app also generates a `.cache` folder for wallpaper rendering. Keep your settings and active wallpaper cache when cleaning an existing installation.
 
-# Run the app
+## Features
+
+- Dark interface with Phosphor icons and wallpaper previews.
+- Folder scanning, wallpaper history, shuffle, previous, and pause controls.
+- Fill, Fit, Stretch, Tile, Center, and Span scaling modes.
+- Interval scheduling and daily wallpaper changes at midnight.
+- Wallpaper transitions and optional zoom effects.
+- System tray controls and optional launch at Windows startup.
+- Support for JPG, JPEG, PNG, WEBP, BMP, JFIF, and TIFF images.
+- DPI-aware interface for high-resolution displays.
+
+## Run from source
+
+Requires Windows and Python 3.10 or later with Tkinter.
+
+```powershell
+git clone https://github.com/bushtwo/Bushtwo-BGS.git
+cd Bushtwo-BGS
+python -m pip install -r requirements.txt
 python main.py
 ```
 
----
+`Start Bushtwo BGS.bat` launches the source version using Python. `Create Desktop Shortcut.bat` creates a shortcut to the source version and also requires Python.
 
-## 🖥️ User Interface Layout
+## Build the executable
 
-Bushtwo BGS uses a **16px Spacing System** with **16px internal card padding**, **16px rounded corners**, borderless components, and adaptive monitor scaling:
+Install the dependencies and build with the checked-in PyInstaller specification:
 
-```
-┌────────────────────────────────────────────────────────┐
-│  1. CURRENT DESKTOP WALLPAPER                          │
-│     [ 16:9 Rounded Preview Box ]     [● ACTIVE Badge]  │
-├────────────────────────────────────────────────────────┤
-│  2. DISPLAY SPECIFICATIONS                             │
-│     🖥 Primary Display: 2560 × 1440 @ 120Hz (32-bit)    │
-├────────────────────────────────────────────────────────┤
-│  3. WALLPAPER DETAILS & CONTROLS                       │
-│     • Active Image: Mountain_Sunset_4K.jpg             │
-│     • Dimensions & Path: 3840 × 2160 • D:\Wallpapers   │
-│     • [◀ Prev]   [🔀 Shuffle / Next]   [⏸ Pause]       │
-│     • Countdown Badge: Next in: 04:32 (or Next: 12 AM) │
-├────────────────────────────────────────────────────────┤
-│  4. WALLPAPER DIRECTORIES                              │
-│     • Clean borderless folder list with image counts   │
-│     • [➕ Add Folder...]   [🗑 Remove]   [🔄 Rescan]     │
-│     • [✓] Include subfolders                           │
-├────────────────────────────────────────────────────────┤
-│  5. SIDE-BY-SIDE CONTROLS                              │
-│     ┌──────────────────────┬─────────────────────────┐ │
-│     │ SCALING MODE         │ SHUFFLE TIMER           │ │
-│     │ [ Fill (Crop)      ▼]│ [ 5 minutes           ▼]│ │
-│     │ Crops without bars   │ Strictly selectable     │ │
-│     └──────────────────────┴─────────────────────────┘ │
-├────────────────────────────────────────────────────────┤
-│  6. SYSTEM & BACKGROUND OPTIONS                        │
-│     • [✓] Run automatically when Windows starts up     │
-│     • [✓] Minimize to system tray on close             │
-└────────────────────────────────────────────────────────┘
+```powershell
+python -m pip install -r requirements.txt pyinstaller
+python -m PyInstaller --clean --noconfirm "Bushtwo BGS.spec"
 ```
 
----
+The executable is written to `dist/Bushtwo BGS.exe`. The specification bundles the required icons and application assets. The root executable is the downloadable distribution; rebuilding does not replace it automatically.
 
-## ✨ Features
+## Repository files
 
-### 🎨 Material Design 3 (M3) Dark Theme
-- **Color System**:
-  - Surface: `#141218`
-  - Cards & Containers: `#211F26` / `#2B2930`
-  - Primary Accent: `#D0BCFF` (Lavender Purple)
-  - On-Primary: `#381E72`
-  - Outline & Variants: `#49454F` / `#CAC4D0`
-- **Curvature**: 16px corner radius across all cards, badges, and popup menus.
-- **Elevation & Layout**: Hugs content dynamically with zero scrollbars and zero awkward dead space.
+- `main.py`: application entry point and event loop.
+- `ui.py` and `tray_manager.py`: interface and system tray controls.
+- `wallpaper_engine.py`, `playlist_manager.py`, and `config_manager.py`: wallpaper handling, playlists, and settings.
+- Rendering and animation modules: Windows rendering backends and effects.
+- `icons/`, SVG sources, application PNGs, and `bushtwo_bgs.ico`: interface and build assets.
+- `render_icons.py`: regenerates interface icons from the SVG sources.
+- `verify_*.py`, `probe_*.py`, and `profile_motion.py`: development verification and diagnostics.
 
-### 📐 Pixel-Precise Spacing Architecture
-- **8px** outer container window margin.
-- **16px** vertical spacing between all cards and sections.
-- **24px** internal top/bottom/left/right padding inside cards.
-- **Fixed & Adaptive**: Disables accidental user resizing while adapting smoothly to 1080p, 2K, and 4K displays.
+Generated `build/`, `build-*/`, `dist/`, and `dist-*/` directories are excluded from Git. They are not required to run the root portable executable. Keep any personal settings stored in those directories before deleting them. Source files, verification scripts, and icon sources remain available for maintenance and rebuilding.
 
-### ⚡ Phosphor Icons Across the Board
-Clean, consistent vector iconography powered by [Phosphor Icons](https://phosphoricons.com/):
-- **Playback**: Bold `shuffle`, `skip-back`, `pause`, and `play` icons.
-- **Folders**: Phosphor `folder`, `folder-plus`, `trash`, and `arrows-clockwise`.
-- **System**: Phosphor `desktop` monitor and customized `check-square` / `square` checkboxes.
-- **System Tray**: Native Win32 32-bit PARGB alpha-blended Phosphor icons directly on the taskbar context menu.
+## License
 
-### 🎛️ Side-by-Side Dropdown Controls
-- **Scaling Mode Dropdown**:
-  - `Fill (Crop to screen)`: Fills entire screen maintaining aspect ratio without black borders.
-  - `Fit (Letterbox)`: Preserves original aspect ratio with bars.
-  - `Stretch`: Stretches image to exact monitor dimensions.
-  - `Tile`: Patterns smaller textures across the display.
-  - `Center`: Displays image at 1:1 actual pixel resolution.
-  - `Span`: Spans wide panoramic wallpapers across multi-monitor setups.
-- **Shuffle Timer Dropdown**:
-  - Strictly selectable presets: `5s`, `15s`, `30s`, `1m`, `5m`, `10m`, `15m`, `30m`.
-  - **1 Day (12:00 AM Midnight)**: Automates wallpaper changes to coincide with the start of each new day!
-- **16px Rounded Dropdown Menus**: Custom borderless popup menus with Windows 11 DWM rounded corners.
-
-### 🖥️ Deep Windows OS Integration
-- **Notification Area (System Tray)**:
-  - Left-click opens/focuses the window.
-  - Right-click brings up a context menu with native Phosphor icons.
-  - Live tooltip showing current active wallpaper and pause status.
-- **Per-Monitor DPI Awareness**: Automatically sets `Per-Monitor V2` DPI awareness via Windows Win32 API to avoid any blurriness or scaling artifacts.
-- **Taskbar Icon Grouping**: Explicit `SetCurrentProcessExplicitAppUserModelID` prevents generic Python icon grouping and binds your custom taskbar icon.
-- **Universal Format Support**: Reads JPG, JPEG, PNG, WEBP, BMP, JFIF, and TIFF. High-compression web formats are converted to cached desktop bitmaps automatically.
-- **Windows Startup**: Optional single-click registry integration (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) to launch minimized at boot.
-
----
-
-## 🛠️ Building the Standalone `.exe`
-
-To package Bushtwo BGS into a single portable binary:
-
-```bash
-pip install pyinstaller pillow pystray
-
-python -m PyInstaller --clean --noconfirm --onefile --windowed \
-  --name "Bushtwo BGS" \
-  --icon "bushtwo_bgs.ico" \
-  --add-data "icons;icons" \
-  --add-data "Bushtwo BGS 64x64 pixels.png;." \
-  --add-data "Bushtwo BGS 32x32 pixels.png;." \
-  --add-data "Bushtwo BGS 16 x16 pixels.png;." \
-  --add-data "Bushtwo BGS 8 x 8 pixels.png;." \
-  --add-data "bushtwo_bgs.ico;." \
-  main.py
-```
-
-The resulting `Bushtwo BGS.exe` will be located in the root / `dist/` directory.
-
----
-
-## 📁 Project Architecture
-
-```
-Bushtwo BGS/
-├── Bushtwo BGS.exe             # Portable standalone executable
-├── main.py                     # Entry point, DPI awareness & event loops
-├── ui.py                       # Material 3 UI, custom controls & styling
-├── tray_manager.py             # Win32 system tray integration & icon menu
-├── wallpaper_engine.py         # Win32 desktop API & registry scaling
-├── playlist_manager.py         # Folder scanner, image queues & history
-├── config_manager.py           # Persistent JSON settings manager
-├── icons/                      # Phosphor icons (16px, 18px, 20px, 24px)
-├── bushtwo_bgs.ico             # Windows multi-resolution icon
-└── config.json                 # Persistent user settings
-```
-
----
-
-## 📜 License
-
-MIT License. Designed and developed with care for personal and open-source use.
+[MIT](LICENSE).
