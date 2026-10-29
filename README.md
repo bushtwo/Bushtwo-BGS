@@ -10,9 +10,9 @@ Download the executable and double-click it to run. Python and installation are 
 
 ## Screenshot
 
-The following contact sheet from an existing screen recording shows the app and wallpaper transitions.
+Bushtwo BGS running on Windows, with wallpaper preview, playback controls, folder management, and background options.
 
-![Bushtwo BGS wallpaper transition preview](docs/wallpaper-preview.jpg)
+![Bushtwo BGS app interface](docs/app-interface.png)
 
 ## Getting started
 
